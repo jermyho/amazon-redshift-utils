@@ -1,4 +1,4 @@
---DROP VIEW admin.v_generate_tbl_ddl;
+--DROP VIEW IF EXISTS admin.v_generate_tbl_ddl;
 /**********************************************************************************************
 Purpose: View to get the DDL for a table.  This will contain the distkey, sortkey, constraints,
 	not null, defaults, etc.
@@ -7,6 +7,7 @@ History:
 2015-05-18 ericfe Added support for Interleaved sortkey
 2015-10-31 ericfe Added cast tp increase size of returning constraint name
 2016-05-24 chriz-bigdata Added support for BACKUP NO tables
+2017-06-15 jermyho Added wiki column for auto generate documentation
 **********************************************************************************************/
 CREATE OR REPLACE VIEW admin.v_generate_tbl_ddl
 AS
@@ -15,6 +16,7 @@ SELECT
  ,tablename
  ,seq
  ,ddl
+ ,wiki
 FROM
  (
  SELECT
@@ -22,6 +24,7 @@ FROM
   ,tablename
   ,seq
   ,ddl
+  ,wiki
  FROM
   (
   --DROP TABLE
@@ -30,6 +33,7 @@ FROM
    ,c.relname AS tablename
    ,0 AS seq
    ,'--DROP TABLE "' + n.nspname + '"."' + c.relname + '";' AS ddl
+   ,'||Schema Name:|*' + n.nspname + '*|'AS wiki
   FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   WHERE c.relkind = 'r'
@@ -39,11 +43,14 @@ FROM
    ,c.relname AS tablename
    ,2 AS seq
    ,'CREATE TABLE IF NOT EXISTS "' + n.nspname + '"."' + c.relname + '"' AS ddl
+   ,'||Table Name:|*' + c.relname + '*|'AS wiki
   FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   WHERE c.relkind = 'r'
   --OPEN PAREN COLUMN LIST
   UNION SELECT n.nspname AS schemaname, c.relname AS tablename, 5 AS seq, '(' AS ddl
+   ,'\\\\ *Column List:* \\\\ \\\\ \n' +
+    '||Column Name||Data Type||Nullable||Default||Encoding||'AS wiki
   FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   WHERE c.relkind = 'r'
@@ -53,6 +60,7 @@ FROM
    ,tablename
    ,seq
    ,'\t' + col_delim + col_name + ' ' + col_datatype + ' ' + col_nullable + ' ' + col_default + ' ' + col_encoding AS ddl
+   ,'| ' + col_name + ' | ' + col_datatype + ' | ' + col_nullable + ' | ' + col_default + ' | ' + col_encoding + ' |' AS wiki
   FROM
    (
    SELECT
@@ -85,15 +93,36 @@ FROM
   UNION (SELECT
    n.nspname AS schemaname
    ,c.relname AS tablename
+   ,200000000 AS seq
+   ,'' AS ddl
+   ,'\\\\ *Constraints:* \\\\ \\\\ \n' +
+    '||Constraint Type||Constraint Name||Constraint Definition||' AS wiki
+  FROM pg_class AS c
+  INNER JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'r'
+  AND EXISTS (SELECT 1
+       FROM pg_constraint AS con
+       WHERE c.relnamespace = con.connamespace
+       AND c.oid = con.conrelid
+       AND con.contype != 'f'
+--       AND pg_get_constraintdef(con.oid) NOT LIKE 'FOREIGN KEY%'
+       LIMIT 1)
+   ORDER BY schemaname,tablename,seq)
+  UNION (SELECT
+   n.nspname AS schemaname
+   ,c.relname AS tablename
    ,200000000 + CAST(con.oid AS INT) AS seq
    ,'\t,' + pg_get_constraintdef(con.oid) AS ddl
+   ,'||' + CASE con.contype WHEN 'p' THEN 'Primary Key' WHEN 'u' THEN 'Unique' ELSE con.contype::text END + '|' + '|' + con.conname + '|' + pg_get_constraintdef(con.oid) + '|' AS wiki
   FROM pg_constraint AS con
   INNER JOIN pg_class AS c ON c.relnamespace = con.connamespace AND c.oid = con.conrelid
   INNER JOIN pg_namespace AS n ON n.oid = c.relnamespace
-  WHERE c.relkind = 'r' AND pg_get_constraintdef(con.oid) NOT LIKE 'FOREIGN KEY%'
-  ORDER BY seq)
+  WHERE c.relkind = 'r' AND con.contype != 'f'
+         -- AND pg_get_constraintdef(con.oid) NOT LIKE 'FOREIGN KEY%'
+  ORDER BY schemaname,tablename,con.contype,seq)
   --CLOSE PAREN COLUMN LIST
   UNION SELECT n.nspname AS schemaname, c.relname AS tablename, 299999999 AS seq, ')' AS ddl
+   ,'' wiki
   FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   WHERE c.relkind = 'r'
@@ -103,6 +132,7 @@ FROM
    ,c.relname AS tablename
    ,300000000 AS seq
    ,'BACKUP NO' as ddl
+   ,'*Backup:* Not backup in cluster snapshots' wiki
 FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   INNER JOIN (SELECT
@@ -120,6 +150,7 @@ FROM pg_namespace AS n
    ,c.relname AS tablename
    ,1 AS seq
    ,'--WARNING: This DDL inherited the BACKUP NO property from the source table' as ddl
+   ,'*WARNING:* This DDL inherited the BACKUP NO property from the source table' wiki
 FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   INNER JOIN (SELECT
@@ -141,6 +172,11 @@ FROM pg_namespace AS n
     WHEN c.reldiststyle = 8 THEN 'DISTSTYLE ALL'
     ELSE '<<Error - UNKNOWN DISTSTYLE>>'
     END AS ddl
+   ,'||Distribution Style:|'+ CASE WHEN c.reldiststyle = 0 THEN 'EVEN|'
+    WHEN c.reldiststyle = 1 THEN 'KEY|'
+    WHEN c.reldiststyle = 8 THEN 'ALL|'
+    ELSE '<<Error - UNKNOWN DISTSTYLE>>|'
+    END AS wiki
   FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   WHERE c.relkind = 'r'
@@ -150,6 +186,7 @@ FROM pg_namespace AS n
    ,c.relname AS tablename
    ,400000000 + a.attnum AS seq
    ,'DISTKEY ("' + a.attname + '")' AS ddl
+   ,'||Distribution Key:|' + a.attname + '|' AS wiki
   FROM pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   INNER JOIN pg_attribute AS a ON c.oid = a.attrelid
@@ -159,6 +196,9 @@ FROM pg_namespace AS n
   --SORTKEY COLUMNS
   UNION select schemaname, tablename, seq,
        case when min_sort <0 then 'INTERLEAVED SORTKEY (' else 'SORTKEY (' end as ddl
+   ,'\\\\ *Sort Key:* \\\\ \\\\ \n' +
+    case when min_sort <0 then 'Interleaved Sort Key \\\\ \\\\ \n' else '' end +
+    '||Key Order||Key Attribute Name||' AS wiki
 from (SELECT
    n.nspname AS schemaname
    ,c.relname AS tablename
@@ -178,6 +218,7 @@ from (SELECT
     THEN '\t"' + a.attname + '"'
     ELSE '\t, "' + a.attname + '"'
     END AS ddl
+   ,'|' + abs(a.attsortkeyord)::text + '|"' + a.attname + '"|' wiki
   FROM  pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   INNER JOIN pg_attribute AS a ON c.oid = a.attrelid
@@ -190,6 +231,7 @@ from (SELECT
    ,c.relname AS tablename
    ,599999999 AS seq
    ,'\t)' AS ddl
+   ,'' wiki
   FROM pg_namespace AS n
   INNER JOIN  pg_class AS c ON n.oid = c.relnamespace
   INNER JOIN  pg_attribute AS a ON c.oid = a.attrelid
@@ -198,6 +240,7 @@ from (SELECT
     AND a.attnum > 0
   --END SEMICOLON
   UNION SELECT n.nspname AS schemaname, c.relname AS tablename, 600000000 AS seq, ';' AS ddl
+   ,'' wiki
   FROM  pg_namespace AS n
   INNER JOIN pg_class AS c ON n.oid = c.relnamespace
   WHERE c.relkind = 'r' )
@@ -205,7 +248,10 @@ from (SELECT
     SELECT 'zzzzzzzz' AS schemaname,
        'zzzzzzzz' AS tablename,
        700000000 + CAST(con.oid AS INT) AS seq,
-       'ALTER TABLE ' + n.nspname + '.' + c.relname + ' ADD ' + pg_get_constraintdef(con.oid)::VARCHAR(1024) + ';' AS ddl
+       'ALTER TABLE ' + n.nspname + '.' + c.relname + ' ADD ' + pg_get_constraintdef(con.oid)::VARCHAR(1024) + ';' AS ddl,
+       '\\\\ *Forigen Key:* \\\\ \\\\ \n' +
+       '||Constraint Name||Constraint Definition||' +
+       '||' + con.conname + '|' + pg_get_constraintdef(con.oid) + '|' AS wiki
     FROM pg_constraint AS con
       INNER JOIN pg_class AS c
               ON c.relnamespace = con.connamespace
